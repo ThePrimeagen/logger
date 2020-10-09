@@ -1,8 +1,17 @@
-use std::{error::Error, str::FromStr};
+extern crate termion;
+
+use std::{error::Error, str::FromStr, fs::File};
 use std::fmt::{self, Debug};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::convert::From;
 use std::num::ParseIntError;
+use std::env;
+use io::BufReader;
+
+use termion::event::Key;
+use termion::input::TermRead;
+use termion::raw::IntoRawMode;
+use std::io::{Write, stdout, stdin};
 
 #[derive(Debug)]
 enum ParsedLineError {
@@ -10,25 +19,29 @@ enum ParsedLineError {
     _BadLine,
     _BadClassName,
     _BadState,
+    MismatchGameId,
     BadNumber,
+    BadCLIArgument,
     BadSeparator,
     NotEnoughCharacters,
 }
 
 #[derive(Debug)]
-struct ParsedLine<'a> {
+struct ParsedLine {
     id: i32,
     parent_id: Option<i32>,  // -1 = not there
-    parent: Option<&'a str>, // -1 = not there
-    class_name: &'a str,
-    function_name: &'a str,
-    state: Vec<&'a str>,
-    args: Vec<&'a str>,
+    parent: Option<String>, // -1 = not there
+    class_name: String,
+    function_name: String,
+    state: Vec<String>,
+    args: Vec<String>,
 }
 
 impl fmt::Display for ParsedLineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ParsedLineError::MismatchGameId => write!(f, "NO ERROR HERE"),
+            ParsedLineError::BadCLIArgument => write!(f, "Bad CLI Argument. Please try again you d-bag"),
             ParsedLineError::_BadLine => write!(f, "Bad Line"),
             ParsedLineError::_BadId => write!(f, "Oh no! your id's are big time suck."),
             ParsedLineError::_BadClassName => write!(f, "Your classname was weak"),
@@ -36,7 +49,7 @@ impl fmt::Display for ParsedLineError {
             ParsedLineError::BadNumber => write!(f, "F U Mccannch (BadState)"),
             ParsedLineError::BadSeparator => write!(f, "Unable to find separator"),
             ParsedLineError::NotEnoughCharacters => write!(f, "Not enough characters in string."),
-        }
+       }
     }
 }
 
@@ -48,35 +61,164 @@ impl From<ParseIntError> for ParsedLineError {
 
 impl Error for ParsedLineError {}
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let stdin = io::stdin();
+#[derive(Debug)]
+struct LoggerConfig {
+    id: i32,
+}
 
-    for line in stdin.lock().lines() {
-        let line = line?;
-        match match parse(&line) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                print!("I have found an erro, and my stomach hurts! {:?}\n", e);
-                None
+fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = env::args().collect();
+
+    let mut file: Option<&str> = None;
+
+    let game_id = match args[1].as_str().parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => return Err(Box::new(ParsedLineError::BadCLIArgument))
+    };
+
+    let mut i = 2;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-f" => {
+                file = Some(args[i + 1].as_str());
+                i += 1;
+            },
+            _ => {
+                return Err(Box::new(ParsedLineError::BadCLIArgument));
             }
-        } {
-            Some(v) => print!("ParsedLine {:?}", v),
-            _ => {}
         }
+        i += 1;
+    }
+
+    if file.is_some() {
+        let file = File::open(file.unwrap())?;
+        let reader = BufReader::new(file);
+        interact_with_lines(parse_lines(game_id, reader)?)?;
+    }
+    else {
+        return Err(Box::new(ParsedLineError::BadCLIArgument));
+    }
+
+    //from_lines(game_id, io::stdin().lock())?;
+
+    return Ok(());
+}
+
+fn group_parsed_lines<'a>(plines: &'a Vec<ParsedLine>) -> Vec<Vec<&'a ParsedLine>> {
+    let mut lines: Vec<Vec<&'a ParsedLine>> = vec![];
+    if plines.len() == 0 {
+        return lines;
+    }
+
+    let mut prev_line = &plines[0];
+    let mut current_group: Vec<&'a ParsedLine> = vec![prev_line];
+
+    for l in &plines[1..] {
+
+        if prev_line.state == l.state || l.parent.is_some() {
+            current_group.push(l);
+        }
+        else {
+            lines.push(current_group);
+            current_group = vec![l];
+        }
+
+        prev_line = l;
+    }
+
+    if current_group.len() > 0 {
+        lines.push(current_group);
+    }
+
+    return lines;
+}
+
+fn interact_with_lines(lines: Vec<ParsedLine>) -> Result<(), Box<dyn Error>> {
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().into_raw_mode()?;
+    let grouped_lines = group_parsed_lines(&lines);
+    let mut idx: i32 = 0;
+
+    if grouped_lines.len() == 0 {
+        print!("Sorry, no data chump\n");
+        return Ok(());
+    }
+
+    for c in stdin.keys() {
+        /*
+        write!(stdout,
+               "{}{}",
+               termion::cursor::Goto(1, 1),
+               termion::clear::CurrentLine)
+                .unwrap();
+        */
+
+        match c.unwrap() {
+            Key::Char('q') => break,
+            Key::Char('k') => idx = std::cmp::max(0, idx - 1),
+            Key::Char('j') => idx = std::cmp::min(grouped_lines.len() as i32 - 1, idx + 1),
+            _ => { }
+        }
+
+        print!("XXXX idx {}\n", idx);
+        let group = &grouped_lines[idx as usize];
+        let mut first = true;
+        for item in group {
+            if first {
+                first = false;
+                print!("{}\n\r", item.state.join(" "));
+            }
+            match &item.parent {
+                Some(_) => {
+                    print!("     {} {} {}", item.id, item.class_name, item.state.join(" "));
+                },
+                None => {
+                    print!("{} {}", item.id, item.class_name);
+                }
+            }
+            print!(" {} {}\n\r", item.function_name, item.args.join(", "));
+        }
+
+        stdout.flush()?;
     }
 
     return Ok(());
 }
 
-fn parse(line: &str) -> Result<ParsedLine, Box<dyn Error>> {
+fn parse_lines<T: std::io::BufRead>(game_id: i32, item: T) -> Result<Vec<ParsedLine>, Box<dyn Error>> {
+    let mut plines: Vec<ParsedLine> = vec![];
 
-    // <ID> <Class> <function name> <state args> <arguments to function>
+    for line in item.lines() {
+        let line = line?;
+
+        match parse(game_id, line.as_str()) {
+            Ok(v) => {
+                print!("Class name insertion (gentle baby) {}\n", v.class_name);
+                plines.push(v);
+            },
+            Err(ParsedLineError::MismatchGameId) => { },
+            Err(e) => {
+                print!("I have found an erro, and my stomach hurts! {:?}\n", e);
+            }
+        }
+    }
+
+    return Ok(plines);
+}
+
+
+fn parse(game_id: i32, og_line: &str) -> Result<ParsedLine, ParsedLineError> {
+
+    // <TS> <ID> <Class> <function name> <state args> <arguments to function>
+    // Parent:<ID>:Child
     // state args
     // <timestamp> <count>:<length>:<object><length>:<object>... count <whitespace separator>
     let (
         _,
         line
-    ) = parse_number::<u64>(line)?;
+    ) = parse_number::<u64>(og_line)?;
     let line = pop_separator(line, ' ')?;
 
     let (
@@ -84,11 +226,22 @@ fn parse(line: &str) -> Result<ParsedLine, Box<dyn Error>> {
         line
     ) = parse_number::<i32>(line)?;
     let line = pop_separator(line, ' ')?;
+
     let (
         class,
         line
     ) = parse_class_name(line)?;
     let line = pop_separator(line, ' ')?;
+
+    if id != game_id && match class.parent_id {
+        Some(v) => {
+            game_id != v
+        },
+        None => true,
+    } {
+        return Err(ParsedLineError::MismatchGameId);
+    }
+
 
     let (
         function_name,
@@ -112,22 +265,24 @@ fn parse(line: &str) -> Result<ParsedLine, Box<dyn Error>> {
         format!("I expected line to be 0 but got {}: with contents {}", line.len(), line));
 
     return Ok(ParsedLine {
-        function_name,
-        class_name: class.class_name,
+        function_name: function_name.to_string(),
+        class_name: class.class_name.to_string(),
         id,
         parent: class.parent_class_name,
         parent_id: class.parent_id,
-        state: states,
-        args,
+        state: states.iter().map(|x| x.to_string()).collect(),
+        args: args.iter().map(|x| x.to_string()).collect(),
     });
 }
+    //let mut parsed_lines: Vec<ParsedLine> = vec![];
+                //parsed_lines.push(v);
 
 // Big question on making this better
 #[derive(Debug)]
-struct ParsedClassName<'a> {
-    class_name: &'a str,
+struct ParsedClassName {
+    class_name: String,
     parent_id: Option<i32>,
-    parent_class_name: Option<&'a str>,
+    parent_class_name: Option<String>,
 }
 
 fn parse_state<'a>(line: &'a str) -> Result<(Vec<&'a str>, &str), ParsedLineError> {
@@ -164,7 +319,7 @@ fn parse_class_name(line: &str) -> Result<(ParsedClassName, &str), ParsedLineErr
 
     if !class_name.contains(":") {
         return Ok((ParsedClassName {
-            class_name,
+            class_name: class_name.to_string(),
             parent_id: None,
             parent_class_name: None,
         }, rest_of_string));
@@ -178,9 +333,9 @@ fn parse_class_name(line: &str) -> Result<(ParsedClassName, &str), ParsedLineErr
     let (class_name, _) = take_until_whitespace(rest_of_class_name)?;
 
     return Ok((ParsedClassName {
-        class_name,
+        class_name: class_name.to_string(),
         parent_id: Some(parent_id),
-        parent_class_name: Some(parent_class),
+        parent_class_name: Some(parent_class.to_string()),
     }, rest_of_string));
 }
 
